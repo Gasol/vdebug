@@ -1,6 +1,8 @@
 import socket
 
+import vdebug
 import vim
+import xml.etree.ElementTree as ET
 
 from . import dbgp
 from . import error
@@ -19,6 +21,7 @@ class SessionHandler:
         self.__ex_handler = util.ExceptionHandler(self)
         self.__session = None
         self.listener = None
+        self.__proxy_success = False
 
     def dispatch_event(self, name, *args):
         event.Dispatcher(self).dispatch_event(name, *args)
@@ -45,6 +48,15 @@ class SessionHandler:
         self.listener = listener.Listener.create()
         print("Vdebug will wait for a connection in the background")
         util.Environment.reload()
+
+        proxy_host = opts.Options.get('proxy_host')
+        proxy_port = opts.Options.get('proxy_port', int)
+        port = opts.Options.get('port', int)
+        idekey = opts.Options.get('ide_key')
+
+        if proxy_host and proxy_port:
+            self.__proxy_success = self.__proxy_init(proxy_host, proxy_port, port, idekey)
+
         if self.is_open():
             self.ui().set_status("listening")
         self.listener.start()
@@ -57,6 +69,11 @@ class SessionHandler:
 
         if self.__session:
             self.__session.close_connection()
+
+        if self.__proxy_success:
+            proxy_host = opts.Options.get('proxy_host')
+            proxy_port = opts.Options.get('proxy_port', int)
+            self.__proxy_stop(proxy_host, proxy_port)
 
     def run(self):
         if self.is_connected():
@@ -118,6 +135,34 @@ class SessionHandler:
         status = self.__session.start(self.listener.create_connection())
         log.Log("refresh event", log.Logger.DEBUG)
         self.dispatch_event("refresh", status)
+
+    def __proxy_init(self, proxy_host, proxy_port, port, idekey):
+        vdebug.log.Log("Connecting to DBGp proxy [%s:%d]" % (proxy_host, proxy_port),\
+                        vdebug.log.Logger.DEBUG)
+        proxy_conn = socket.create_connection((proxy_host, proxy_port), 30)
+
+        vdebug.log.Log("Sending proxyinit command",vdebug.log.Logger.DEBUG)
+        msg = 'proxyinit -p %d -k %s -m 0\0' % (port, idekey)
+        proxy_conn.send(bytearray(msg, 'utf8'))
+        proxy_conn.shutdown(socket.SHUT_WR)
+
+        response = proxy_conn.recv(8192)
+        proxy_conn.close()
+        response = ET.fromstring(response)
+        return bool(response.get("success"))
+
+    def __proxy_stop(self, proxy_host, proxy_port, idekey):
+        if not self.__proxy_success:
+            return
+
+        proxy_conn = socket.create_connection((proxy_host, proxy_port), 30)
+
+        vdebug.log.Log("Sending proxystop command",vdebug.log.Logger.DEBUG)
+        msg = 'proxystop -k %s' % str(idekey)
+        proxy_conn.send(msg)
+        proxy_conn.close()
+        self.__proxy_success = False
+
 
 
 class Session:
